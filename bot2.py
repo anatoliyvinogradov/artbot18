@@ -9,6 +9,7 @@ import html
 import logging
 import base64
 import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -26,6 +27,7 @@ from urllib.parse import urlparse
 
 load_dotenv()
 
+BASE_DIR = Path(__file__).resolve().parent
 DEFAULT_TAGS = [t.strip() for t in os.getenv("DEFAULT_TAGS", "").split(",") if t.strip()]
 MAX_TAGS = int(os.getenv("MAX_TAGS", "8"))
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
@@ -486,39 +488,42 @@ async def cmd_dl(msg: Message, command: CommandObject):
     if not command or not command.args:
         return await msg.answer("❌ Укажи ID и тег. Пример: <code>/dl 123456789 art</code>")
 
+    parts = command.args.strip().split(maxsplit=1)
+    if len(parts) < 2:
+        return await msg.answer("❌ Укажи ID и тег. Пример: <code>/dl 123456789 art</code>")
+
+    pixiv_id, extra_tag = parts[0], parts[1]
+
     try:
-        parts = command.args.strip().split(maxsplit=1)
-        if len(parts) < 2:
-            return await msg.answer("❌ Укажи ID и тег. Пример: <code>/dl 123456789 art</code>")
-
-        pixiv_id, extra_tag = parts[0], parts[1]
-
-        # Запускаем внешний скрипт
+        env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
         result = subprocess.run(
-            ["python", "pixiv_dl.py", "--id", pixiv_id, "--tags", extra_tag],
+            [sys.executable, str(BASE_DIR / "pixiv_dl.py"), "--id", pixiv_id, "--tags", extra_tag],
+            cwd=str(BASE_DIR),
             capture_output=True,
-            text=True
+            text=True,
+            env=env,
         )
 
-        output = result.stdout.strip()
-        errors = result.stderr.strip()
+        if result.returncode != 0:
+            return await msg.answer(
+                "❌ Ошибка:\n<pre>{}</pre>".format(html.escape(result.stderr or result.stdout or "no output")),
+                parse_mode=ParseMode.HTML,
+            )
 
-        if output:
-            await msg.answer(f"✅ Скрипт выполнен:\n<pre>{html.escape(output)}</pre>")
-        elif errors:
-            await msg.answer(f"⚠️ Скрипт завершился с ошибкой:\n<pre>{html.escape(errors)}</pre>")
-        else:
-            await msg.answer("✅ Скрипт выполнен (без вывода).")
-
+        return await msg.answer(
+            "✅ Готово:\n<pre>{}</pre>".format(html.escape(result.stdout or "Скрипт отработал без вывода")),
+            parse_mode=ParseMode.HTML,
+        )
     except Exception as e:
         logger.exception("Ошибка в /dl: %s", e)
-        await msg.answer(f"❌ Ошибка запуска скрипта: {e}")
+        return await msg.answer(f"❌ Ошибка запуска: {e}")
 
 @dp.message(Command("dl_da"))
 async def cmd_dl_da(msg: Message, command: CommandObject):
     if not is_admin(msg.from_user.id):
         return
 
+    # ожидаем: /dl_da <id> <tag>
     if not command or not command.args:
         return await msg.answer(
             "Использование: <code>/dl_da &lt;id&gt; &lt;tag&gt;</code>\n"
@@ -527,25 +532,44 @@ async def cmd_dl_da(msg: Message, command: CommandObject):
 
     parts = command.args.strip().split(maxsplit=1)
     if len(parts) < 2:
-        return await msg.answer("Нужно указать ID и тег. Например: <code>/dl_da 1104774946 cosplay</code>")
+        return await msg.answer(
+            "Нужно указать ID и тег. Например: <code>/dl_da 1104774946 cosplay</code>"
+        )
 
     dev_id, tag = parts[0], parts[1]
 
     try:
-        # Запускаем deviantart_dl.py
+        # запускаем скрипт тем же интерпретатором (из venv), что и бот
+        env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
         result = subprocess.run(
-            ["python", "deviantart_dl.py", "--id", dev_id, "--tags", tag],
+            [sys.executable, str(BASE_DIR / "deviantart_dl.py"), "--id", dev_id, "--tags", tag],
+            cwd=str(BASE_DIR),
             capture_output=True,
             text=True,
-            encoding="utf-8"
+            env=env,
         )
 
-        if result.returncode == 0:
-            await msg.answer(f"✅ DeviantArt изображение с ID {dev_id} загружено.\n```\n{result.stdout.strip()}\n```")
-        else:
-            await msg.answer(f"❌ Ошибка при загрузке DeviantArt: \n```\n{result.stderr.strip()}\n```")
+        stdout = (result.stdout or "").strip()
+        stderr = (result.stderr or "").strip()
+
+        if result.returncode != 0:
+            return await msg.answer(
+                "❌ Ошибка при загрузке DeviantArt:\n<pre>{}</pre>".format(
+                    html.escape(stderr or stdout or "no output")
+                ),
+                parse_mode=ParseMode.HTML,
+            )
+
+        await msg.answer(
+            "✅ DeviantArt загрузка завершена:\n<pre>{}</pre>".format(
+                html.escape(stdout or "Скрипт отработал без вывода")
+            ),
+            parse_mode=ParseMode.HTML,
+        )
+
     except Exception as e:
-        await msg.answer(f"❌ Не удалось выполнить deviantart_dl.py: {e}")
+        logger.exception("Ошибка в /dl_da: %s", e)
+        await msg.answer(f"❌ Ошибка запуска deviantart_dl.py: {e}")
 
 # ---------- Точка входа ----------
 
@@ -565,3 +589,4 @@ if __name__ == "__main__":
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
         pass
+
