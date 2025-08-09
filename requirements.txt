@@ -1,0 +1,10 @@
+aiogram==3.10.0
+python-dotenv==1.0.1
+requests==2.32.3
+beautifulsoup4==4.12.3
+
+# Для HTML-парсинга bs4 хватает; lxml ускоряет, но не обязателен:
+lxml==5.2.2
+
+# (Опционально) если столкнётесь с Cloudflare у сайтов – можно использовать:
+# cloudscraper==1.2.71
