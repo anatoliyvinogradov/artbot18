@@ -32,14 +32,13 @@ UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like 
 # https://www.deviantart.com/deviation/1104774946
 ID_RE = re.compile(r"(\d{6,})")
 URL_ID_RE = re.compile(r"deviantart\.com/(?:deviation/|.+?/art/.+?-)(\d+)", re.I)
-
 IMG_EXT_RE = re.compile(r"\.(jpg|jpeg|png|gif|webp)(?:\?|$)", re.I)
 
 
 # ----------------- Утилиты -----------------
 
 def parse_id(text: str) -> Optional[str]:
-    """ Извлекаем ID из URL или строки с цифрами. """
+    """Извлекаем ID из URL или строки с цифрами."""
     if not text:
         return None
     m = URL_ID_RE.search(text)
@@ -52,14 +51,14 @@ def parse_id(text: str) -> Optional[str]:
 
 
 def split_inputs(raw: Optional[str]) -> List[str]:
-    """Разбивает строку по запятой в список токенов (id или url)."""
+    """Разбиваем строку по запятой (списки ID/URL)."""
     if not raw:
         return []
     return [p.strip() for p in raw.split(",") if p.strip()]
 
 
 def make_artwork_url(art_input: str) -> str:
-    """ Если передали ID — формируем URL deviation/<id>, иначе возвращаем как есть. """
+    """Если передали ID — формируем URL deviation/<id>, иначе возвращаем как есть."""
     if art_input.startswith(("http://", "https://")):
         return art_input
     illust_id = parse_id(art_input)
@@ -69,7 +68,6 @@ def make_artwork_url(art_input: str) -> str:
 
 
 def sanitize_filename(name: str) -> str:
-    # умеренная чистка для NTFS и пр.
     name = unicodedata.normalize("NFKC", name).strip()
     name = re.sub(r'[\\/:*?"<>|\r\n\t]+', " ", name)
     name = re.sub(r"\s{2,}", " ", name).strip()
@@ -83,14 +81,14 @@ def guess_ext_from_url(url: str) -> str:
 
 def get_soup(sess: requests.Session, url: str) -> BeautifulSoup:
     headers = {"User-Agent": UA, "Referer": url}
-    r = sess.get(url, headers=headers, timeout=20)
+    r = sess.get(url, headers=headers, timeout=25)
     r.raise_for_status()
     return BeautifulSoup(r.text, "html.parser")
 
 
 def extract_from_meta(soup: BeautifulSoup) -> Tuple[str, str, List[str]]:
     """
-    Берём og:/twitter: мета — основной title, canonical URL и один image.
+    Основной способ: og:/twitter: мета.
     Возвращаем (title, canonical_url, [image_urls]).
     """
     def mprop(prop):
@@ -110,8 +108,7 @@ def extract_from_meta(soup: BeautifulSoup) -> Tuple[str, str, List[str]]:
 
 def try_extract_nextdata_all_images(soup: BeautifulSoup) -> Tuple[Optional[str], Optional[str], List[str]]:
     """
-    Фоллбек/расширение: попробуем найти в JSON (Next.js state, initial state и т.п.)
-    все встречающиеся поля-URL-изображений.
+    Фоллбек: пробуем найти все возможные URL изображений в больших JSON-скриптах (Next.js/initial state).
     Возвращаем (title|None, canonical_url|None, [image_urls]).
     """
     title = None
@@ -121,7 +118,6 @@ def try_extract_nextdata_all_images(soup: BeautifulSoup) -> Tuple[Optional[str],
     def add_url(u: str):
         if not u:
             return
-        # только вероятные изображения
         if IMG_EXT_RE.search(u) and u not in image_urls:
             image_urls.append(u)
 
@@ -129,7 +125,6 @@ def try_extract_nextdata_all_images(soup: BeautifulSoup) -> Tuple[Optional[str],
         txt = sc.string or sc.text or ""
         if not txt or ("{" not in txt or "}" not in txt):
             continue
-        # грубая попытка найти большой JSON
         start = txt.find("{")
         end = txt.rfind("}")
         if start < 0 or end <= start:
@@ -141,21 +136,17 @@ def try_extract_nextdata_all_images(soup: BeautifulSoup) -> Tuple[Optional[str],
         except Exception:
             continue
 
-        # рекурсивно пройдём по объекту, собирая title/url/src, похожие на нужные
         def walk(o):
             nonlocal title, canonical
             if isinstance(o, dict):
-                # возможные заголовки
                 if not title:
                     t = o.get("title")
                     if isinstance(t, str) and t.strip():
                         title = t.strip()
-                # canonical
                 if not canonical:
                     u = o.get("url")
                     if isinstance(u, str) and "deviantart.com" in u:
                         canonical = u
-                # возможные ссылки на изображения
                 for k in ("src", "href", "url"):
                     v = o.get(k)
                     if isinstance(v, str):
@@ -171,15 +162,25 @@ def try_extract_nextdata_all_images(soup: BeautifulSoup) -> Tuple[Optional[str],
     return title, canonical, image_urls
 
 
+def unique_preserve_order(items: Iterable[str]) -> List[str]:
+    seen = set()
+    out = []
+    for x in items:
+        if x not in seen:
+            seen.add(x)
+            out.append(x)
+    return out
+
+
 def build_token_from_canonical(canonical_url: str, fallback_id: Optional[str]) -> str:
     """
-    Формируем токен для имени:
+    Токен для имени файла:
       deviantart.com_<username>_art_<slug-id>
-    Если canonical пустой — deviantart.com_deviation_<id> (если вытащили id), иначе просто deviantart.com
+    Если нет canonical: deviantart.com_deviation_<id> (если есть id), иначе deviantart.com.
     """
     if canonical_url:
         u = urlparse(canonical_url)
-        netloc = u.netloc  # deviantart.com
+        netloc = u.netloc
         path = u.path.strip("/")
         token_path = path.replace("/", "_")
         return f"{netloc}_{token_path}" if token_path else netloc
@@ -201,26 +202,15 @@ def download_image(sess: requests.Session, img_url: str, referer_url: str) -> by
 
 
 def make_filename(token: str, title: str, tags: List[str]) -> str:
-    # квадратные скобки — теги (через пробел), круглые — токен-ссылка
     safe_title = sanitize_filename(title)[:120] or "deviation"
     tag_block = " ".join(tags) if tags else ""
     return f"[{tag_block}]({token}){safe_title}"
 
 
-def unique_preserve_order(items: Iterable[str]) -> List[str]:
-    seen = set()
-    out = []
-    for x in items:
-        if x not in seen:
-            seen.add(x)
-            out.append(x)
-    return out
-
-
 def collect_all_images(sess: requests.Session, url: str) -> Tuple[str, str, List[str]]:
     """
     Возвращает (title, canonical_url, [image_urls...]) со страницы DeviantArt.
-    Сначала meta, затем JSON; объединяем и убираем дубли.
+    Сначала meta, затем JSON; объединяем и убираем дубли; при необходимости парсим <img>.
     """
     soup = get_soup(sess, url)
 
@@ -229,10 +219,8 @@ def collect_all_images(sess: requests.Session, url: str) -> Tuple[str, str, List
 
     title = title1 or title2 or ""
     canonical = canonical1 or canonical2 or url
-
     images = unique_preserve_order([*(imgs1 or []), *(imgs2 or [])])
 
-    # На крайний случай попробуем достать хоть что-то из <img> тегов
     if not images:
         for im in soup.find_all("img"):
             src = (im.get("src") or im.get("data-src") or "").strip()
@@ -243,16 +231,12 @@ def collect_all_images(sess: requests.Session, url: str) -> Tuple[str, str, List
 
 
 def run_single(art_input: str, out_dir: Path, extra_tags: List[str], download_all: bool) -> List[Path]:
-    """
-    Скачивает одно «произведение»: одну или все картинки.
-    Возвращает список сохранённых путей.
-    """
+    """Скачивает одно «произведение»: одну или все картинки."""
     url = make_artwork_url(art_input)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     with requests.Session() as sess:
         title, canonical, images = collect_all_images(sess, url)
-
         if not images:
             raise SystemExit("Не удалось определить URL(ы) изображения со страницы.")
 
@@ -266,11 +250,11 @@ def run_single(art_input: str, out_dir: Path, extra_tags: List[str], download_al
         for idx, img_url in enumerate(to_download):
             data = download_image(sess, img_url, referer_url=canonical)
             ext = guess_ext_from_url(img_url)
-            suffix = f"_p{idx}" if download_all else None
+            suffix = f"_p{idx}" if download_all else ""
 
-            out_path = out_dir / ((base_name + (suffix or "")) + ext)
-            i = 1
+            out_path = out_dir / f"{base_name}{suffix}{ext}"
             final_path = out_path
+            i = 1
             while final_path.exists():
                 final_path = out_dir / f"{out_path.stem} ({i}){ext}"
                 i += 1
@@ -288,9 +272,10 @@ def main():
     parser = argparse.ArgumentParser(
         description=(
             "Download DeviantArt image(s) with custom filename.\n"
-            "Формат (предпочтительный):\n"
+            "Формат 1 (простой):\n"
             "  deviantart_dl.py <ID|URL[,ID|URL,...]> [tags...] [--all] [--out DIR]\n"
-            "Совместимость со старым форматом (--id/--url/--tags) сохранена.\n"
+            "Формат 2 (совместимость):\n"
+            "  deviantart_dl.py --id <...> [--tags \"...\"] [--all] [--out DIR]\n"
         )
     )
 
@@ -320,24 +305,21 @@ def main():
     download_all = bool(args.download_all)
 
     if args.inputs:
-        # Позиционный режим: теги в tags_pos
         tag_tokens = list(args.tags_pos or [])
     else:
-        # Старый режим: теги во флаге --tags
         tag_tokens = [t for t in (args.tags or "").split() if t.strip()]
 
-    # Если --all случайно попал в теги — учитываем и убираем
     if "--all" in tag_tokens:
         download_all = True
         tag_tokens = [t for t in tag_tokens if t != "--all"]
 
     extra_tags = tag_tokens
 
-    # 3) Готовим выходную папку
+    # 3) Куда сохраняем
     out_dir = Path(args.out).resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # 4) Обработка списка
+    # 4) Обрабатываем список
     for tok in tokens:
         try:
             run_single(tok, out_dir, extra_tags, download_all)
