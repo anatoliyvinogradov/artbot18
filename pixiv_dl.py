@@ -210,27 +210,53 @@ def main():
     parser = argparse.ArgumentParser(
         description=(
             "Download Pixiv image(s) with custom filename.\n"
-            "Формат: pixiv_dl.py <ID|URL[,ID|URL,...]> [tags...] [--all] [--out DIR]\n"
-            "Примеры:\n"
-            "  python pixiv_dl.py 126867032 ai\n"
-            "  python pixiv_dl.py https://www.pixiv.net/en/artworks/126867032 ai --all\n"
-            "  python pixiv_dl.py 126839632,126867032,124372715 fanart\n"
-            "  python pixiv_dl.py https://.../126839632,https://.../126867032 spice_and_wolf --all\n"
+            "Формат 1 (простой):\n"
+            "  pixiv_dl.py <ID|URL[,ID|URL,...]> [tags...] [--all] [--out DIR]\n"
+            "Формат 2 (старый, совместимый):\n"
+            "  pixiv_dl.py --id <...> [--tags \"...\"] [--all] [--out DIR]\n"
         )
     )
 
-    # Позиции: inputs (обязательный) + произвольный хвост rest (теги и, возможно, --all)
-    parser.add_argument("inputs", help="ID/URL или список через запятую")
-    parser.add_argument("rest", nargs=argparse.REMAINDER, help="Теги и/или флаг --all (в любом порядке)")
+    # Простой позиционный режим
+    parser.add_argument("inputs", nargs="?", help="ID/URL или список через запятую (позиционно)")
+    parser.add_argument("tags_pos", nargs="*", help="Теги позиционно (несколько слов)")
 
-    # Опции
-    parser.add_argument("--out", default=str(OUTPUT_DIR), help="Выходная папка (по умолчанию: из .env OUTPUT_DIR)")
+    # Старые флаги (совместимость)
+    parser.add_argument("--url", help="URL или список URL (через запятую)")
+    parser.add_argument("--id", help="ID или список ID/URL (через запятую)")
+    parser.add_argument("--tags", default="", help="Теги через пробел (флаг)")
+
+    # Общие опции
+    parser.add_argument("--out", default=str(OUTPUT_DIR), help="Выходная папка")
     parser.add_argument("--all", dest="download_all", action="store_true", help="Скачать все страницы работы")
 
     args = parser.parse_args()
 
-    # Собираем список токенов и конвертируем в ID
-    tokens = split_inputs(args.inputs)
+    # 1) Источник ID/URL
+    raw_inputs = args.inputs or args.url or args.id
+    if not raw_inputs:
+        raise SystemExit("Нужно передать ID/URL. См. --help")
+
+    tokens = split_inputs(raw_inputs)
+
+    # 2) Теги и флаг --all
+    download_all = bool(args.download_all)
+
+    if args.inputs:
+        # Позиционный режим: теги в tags_pos
+        tag_tokens = list(args.tags_pos or [])
+    else:
+        # Старый режим: теги во флаге --tags
+        tag_tokens = [t for t in (args.tags or "").split() if t.strip()]
+
+    # Если --all случайно попал в теги — учитываем и убираем
+    if "--all" in tag_tokens:
+        download_all = True
+        tag_tokens = [t for t in tag_tokens if t != "--all"]
+
+    extra_tags = tag_tokens
+
+    # 3) Конвертируем в список числовых ID
     id_list: list[str] = []
     for tok in tokens:
         iid = parse_id(tok)
@@ -241,18 +267,6 @@ def main():
 
     if not id_list:
         raise SystemExit("Не удалось извлечь ни одного Pixiv ID.")
-
-    # Разбор хвоста: вытащим --all, остальное — теги
-    download_all = bool(args.download_all)
-    rest_tokens = [t for t in (args.rest or []) if t.strip()]
-    # Поддержка случая, когда бот передал '--all' внутри тегов
-    cleaned_tags: list[str] = []
-    for t in rest_tokens:
-        if t == "--all":
-            download_all = True
-        else:
-            cleaned_tags.append(t)
-    extra_tags = cleaned_tags
 
     out_dir = pathlib.Path(args.out).resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
