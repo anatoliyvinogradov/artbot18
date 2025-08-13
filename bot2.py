@@ -28,6 +28,23 @@ from urllib.parse import urlparse
 load_dotenv()
 
 BASE_DIR = Path(__file__).resolve().parent
+
+def _parse_dl_dir_map(s: str) -> dict[str, Path]:
+    mp = {}
+    for pair in (s or "").split(";"):
+        pair = pair.strip()
+        if not pair:
+            continue
+        if "=" not in pair:
+            continue
+        key, val = pair.split("=", 1)
+        key = key.strip()
+        val = val.strip()
+        if key and val:
+            mp[key] = Path(val).resolve()
+    return mp
+
+
 DEFAULT_TAGS = [t.strip() for t in os.getenv("DEFAULT_TAGS", "").split(",") if t.strip()]
 MAX_TAGS = int(os.getenv("MAX_TAGS", "8"))
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
@@ -43,6 +60,20 @@ ALLOWED_EXT = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp"}
 
 if not BOT_TOKEN or not CHANNEL_ID:
     raise RuntimeError("Заполни BOT_TOKEN и CHANNEL_ID в .env")
+
+DL_DIR_MAP = _parse_dl_dir_map(os.getenv("DL_DIR_BY_BOT", ""))  # из .env
+DEFAULT_OUT_DIR = Path(os.getenv("OUTPUT_DIR", "./images")).resolve()
+
+CURRENT_BOT_ID: str | None = None
+CURRENT_BOT_USERNAME: str | None = None
+
+def _out_dir_for_current_bot() -> Path:
+    # Сначала пробуем по ID, затем по username, иначе дефолт
+    if CURRENT_BOT_ID and str(CURRENT_BOT_ID) in DL_DIR_MAP:
+        return DL_DIR_MAP[str(CURRENT_BOT_ID)]
+    if CURRENT_BOT_USERNAME and CURRENT_BOT_USERNAME in DL_DIR_MAP:
+        return DL_DIR_MAP[CURRENT_BOT_USERNAME]
+    return DEFAULT_OUT_DIR
 
 # ---------- Утилиты ----------
 
@@ -574,19 +605,26 @@ async def cmd_dl_da(msg: Message, command: CommandObject):
 # ---------- Точка входа ----------
 
 async def main():
-    # Убедимся, что папки существуют
+    global CURRENT_BOT_ID, CURRENT_BOT_USERNAME
+
     IMAGES_DIR.mkdir(parents=True, exist_ok=True)
     USED_DIR.mkdir(parents=True, exist_ok=True)
 
-    # Запускаем планировщик
-    asyncio.create_task(scheduler_loop())
+    # Узнаём кто мы
+    me = await bot.get_me()
+    CURRENT_BOT_ID = me.id
+    CURRENT_BOT_USERNAME = (me.username or "").lower()
+    logger.info("Запущен бот: id=%s username=@%s → out_dir=%s",
+                CURRENT_BOT_ID, CURRENT_BOT_USERNAME, _out_dir_for_current_bot())
 
-    # Стартуем бота (long polling)
+    asyncio.create_task(scheduler_loop())
     await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
+
 
 if __name__ == "__main__":
     try:
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
         pass
+
 
