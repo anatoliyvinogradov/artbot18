@@ -28,6 +28,37 @@ from urllib.parse import urlparse
 
 load_dotenv()
 
+BASE_DIR = Path(__file__).resolve().parent
+
+def _parse_dl_dir_map(s: str) -> dict[str, Path]:
+    mp = {}
+    for pair in (s or "").split(";"):
+        pair = pair.strip()
+        if not pair:
+            continue
+        if "=" not in pair:
+            continue
+        key, val = pair.split("=", 1)
+        key = key.strip()
+        val = val.strip()
+        if key and val:
+            mp[key] = Path(val).resolve()
+    return mp
+
+DL_DIR_MAP = _parse_dl_dir_map(os.getenv("DL_DIR_BY_BOT", ""))  # из .env
+DEFAULT_OUT_DIR = Path(os.getenv("OUTPUT_DIR", "./imagesartbot")).resolve()
+
+CURRENT_BOT_ID: str | None = None
+CURRENT_BOT_USERNAME: str | None = None
+
+def _out_dir_for_current_bot() -> Path:
+    # Сначала пробуем по ID, затем по username, иначе дефолт
+    if CURRENT_BOT_ID and str(CURRENT_BOT_ID) in DL_DIR_MAP:
+        return DL_DIR_MAP[str(CURRENT_BOT_ID)]
+    if CURRENT_BOT_USERNAME and CURRENT_BOT_USERNAME in DL_DIR_MAP:
+        return DL_DIR_MAP[CURRENT_BOT_USERNAME]
+    return DEFAULT_OUT_DIR
+
 DEFAULT_TAGS = [t.strip() for t in os.getenv("DEFAULT_TAGS", "").split(",") if t.strip()]
 MAX_TAGS = int(os.getenv("MAX_TAGS", "8"))
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
@@ -481,110 +512,123 @@ async def cmd_post(msg: Message, command: CommandObject):
         return await msg.answer(f"❌ {e}", parse_mode=None)
 
 @dp.message(Command("dl"))
-async def cmd_dl(msg: Message, command: CommandObject | None):
+async def cmd_dl(msg: Message, command: CommandObject):
     if not is_admin(msg.from_user.id):
         return
 
-    args = command.args if command else None
-    if not args:
-        return await msg.answer("❌ Укажи ID и тег. Пример: <code>/dl 123456789 art</code>")
-
-    parts = args.strip().split(maxsplit=1)
-    if len(parts) < 2:
-        return await msg.answer("❌ Укажи ID и тег. Пример: <code>/dl 123456789 art</code>")
-
-    pixiv_id, extra_tag = parts[0], parts[1]
-
-    try:
-        result = subprocess.run(
-            ["python", "pixiv_dl.py", "--id", pixiv_id, "--tags", extra_tag],
-            capture_output=True,
-            text=True,
-            check=False
-        )
-
-        output = (result.stdout or "").strip()
-        errors = (result.stderr or "").strip()
-
-        # Логируем всё
-        logging.info(f"Команда /dl от {msg.from_user.id} — ID={pixiv_id}, TAG={extra_tag}")
-        logging.info(f"Код возврата: {result.returncode}")
-        logging.info(f"STDOUT: {output or '[пусто]'}")
-        logging.info(f"STDERR: {errors or '[пусто]'}")
-
-        if result.returncode != 0:
-            return await msg.answer(
-                "⚠️ Скрипт завершился с ошибкой (код {}):\n<pre>{}</pre>".format(
-                    result.returncode, html.escape(errors or output or "нет вывода")
-                )
-            )
-
-        # успех
-        if output:
-            return await msg.answer(f"✅ Скрипт выполнен:\n<pre>{html.escape(output)}</pre>")
-        elif errors:
-            return await msg.answer(f"⚠️ Скрипт завершился без stdout, но stderr содержит:\n<pre>{html.escape(errors)}</pre>")
-        else:
-            return await msg.answer("✅ Скрипт выполнен (stdout и stderr пустые).")
-
-    except Exception as e:
-        logging.exception(f"Ошибка в /dl: {e}")
-        return await msg.answer(f"❌ Ошибка запуска скрипта:\n<pre>{html.escape(str(e))}</pre>")
-
-@dp.message(Command("dl_da"))
-async def cmd_dl_da(msg: Message, command: CommandObject | None):
-    if not is_admin(msg.from_user.id):
-        return
-
+    usage = "Использование: <code>/dl &lt;pixiv_id&gt; &lt;tag&gt;</code>\nНапр: <code>/dl 124856160 art</code>"
     if not command or not command.args:
-        return await msg.answer(
-            "Использование: <code>/dl_da &lt;id&gt; &lt;tag&gt;</code>\n"
-            "Например: <code>/dl_da 1104774946 cosplay</code>"
-        )
+        return await msg.answer(usage)
 
     parts = command.args.strip().split(maxsplit=1)
     if len(parts) < 2:
-        return await msg.answer("Нужно указать ID и тег. Например: <code>/dl_da 1104774946 cosplay</code>")
+        return await msg.answer(usage)
 
-    dev_id, tag = parts[0], parts[1]
+    pixiv_id, extra_tag = parts[0], parts[1]
+    out_dir = _out_dir_for_current_bot()
+    out_dir.mkdir(parents=True, exist_ok=True)
 
     try:
-        # неблокирующий запуск (лучше чем subprocess.run в async def)
-        proc = await asyncio.create_subprocess_exec(
-            sys.executable, "deviantart_dl.py", "--id", dev_id, "--tags", tag,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
+        env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
+        result = subprocess.run(
+            [sys.executable, str(BASE_DIR / "pixiv_dl.py"),
+             "--id", pixiv_id, "--tags", extra_tag, "--out", str(out_dir)],
+            cwd=str(BASE_DIR),
+            capture_output=True,
+            text=True,
+            env=env,
         )
-        out_b, err_b = await proc.communicate()
-        stdout = (out_b.decode(errors="replace") if out_b else "").strip()
-        stderr = (err_b.decode(errors="replace") if err_b else "").strip()
 
-        if proc.returncode == 0:
-            text = f"✅ DeviantArt изображение с ID {dev_id} загружено.\n<pre>{html.escape(stdout) or 'без вывода'}</pre>"
-            await msg.answer(text)
-        else:
-            text = f"❌ Ошибка при загрузке DeviantArt (код {proc.returncode}):\n<pre>{html.escape(stderr or stdout or 'без вывода')}</pre>"
-            await msg.answer(text)
+        stdout = (result.stdout or "").strip()
+        stderr = (result.stderr or "").strip()
 
+        if result.returncode != 0:
+            return await msg.answer(
+                "❌ Ошибка Pixiv:\n<pre>{}</pre>".format(html.escape(stderr or stdout or "no output")),
+                parse_mode=ParseMode.HTML,
+            )
+
+        await msg.answer(
+            "✅ Pixiv → <code>{}</code>\n<pre>{}</pre>".format(
+                html.escape(str(out_dir)), html.escape(stdout or "Скрипт отработал без вывода")
+            ),
+            parse_mode=ParseMode.HTML,
+        )
     except Exception as e:
-        # на всякий — тоже экранируем
-        await msg.answer(f"❌ Не удалось выполнить deviantart_dl.py:\n<pre>{html.escape(str(e))}</pre>")
+        logger.exception("Ошибка в /dl: %s", e)
+        await msg.answer(f"❌ Ошибка запуска: {e}")
+
+
+@dp.message(Command("dl_da"))
+async def cmd_dl_da(msg: Message, command: CommandObject):
+    if not is_admin(msg.from_user.id):
+        return
+
+    usage = "Использование: <code>/dl_da &lt;id&gt; &lt;tag&gt;</code>\nНапр: <code>/dl_da 1104774946 art</code>"
+    if not command or not command.args:
+        return await msg.answer(usage)
+
+    parts = command.args.strip().split(maxsplit=1)
+    if len(parts) < 2:
+        return await msg.answer(usage)
+
+    dev_id, tag = parts[0], parts[1]
+    out_dir = _out_dir_for_current_bot()
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
+        result = subprocess.run(
+            [sys.executable, str(BASE_DIR / "deviantart_dl.py"),
+             "--id", dev_id, "--tags", tag, "--out", str(out_dir)],
+            cwd=str(BASE_DIR),
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+
+        stdout = (result.stdout or "").strip()
+        stderr = (result.stderr or "").strip()
+
+        if result.returncode != 0:
+            return await msg.answer(
+                "❌ Ошибка DeviantArt:\n<pre>{}</pre>".format(html.escape(stderr or stdout or "no output")),
+                parse_mode=ParseMode.HTML,
+            )
+
+        await msg.answer(
+            "✅ DeviantArt → <code>{}</code>\n<pre>{}</pre>".format(
+                html.escape(str(out_dir)), html.escape(stdout or "Скрипт отработал без вывода")
+            ),
+            parse_mode=ParseMode.HTML,
+        )
+    except Exception as e:
+        logger.exception("Ошибка в /dl_da: %s", e)
+        await msg.answer(f"❌ Ошибка запуска: {e}")
+
 
 # ---------- Точка входа ----------
 
 async def main():
-    # Убедимся, что папки существуют
+    global CURRENT_BOT_ID, CURRENT_BOT_USERNAME
+
     IMAGES_DIR.mkdir(parents=True, exist_ok=True)
     USED_DIR.mkdir(parents=True, exist_ok=True)
 
-    # Запускаем планировщик
-    asyncio.create_task(scheduler_loop())
+    # Узнаём кто мы
+    me = await bot.get_me()
+    CURRENT_BOT_ID = me.id
+    CURRENT_BOT_USERNAME = (me.username or "").lower()
+    logger.info("Запущен бот: id=%s username=@%s → out_dir=%s",
+                CURRENT_BOT_ID, CURRENT_BOT_USERNAME, _out_dir_for_current_bot())
 
-    # Стартуем бота (long polling)
+    asyncio.create_task(scheduler_loop())
     await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
+
 
 if __name__ == "__main__":
     try:
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
         pass
+
