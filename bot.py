@@ -511,6 +511,148 @@ async def cmd_post(msg: Message, command: CommandObject):
         logger.exception("Ошибка в /post: %s", e)
         return await msg.answer(f"❌ {e}", parse_mode=None)
 
+# ---------------- /img (универсальная загрузка) ----------------
+
+PIXIV_URL_RE = re.compile(r"pixiv\.net", re.I)
+DA_URL_RE    = re.compile(r"deviantart\.com", re.I)
+ONLY_DIGITS  = re.compile(r"^\d+$")
+
+def _classify_item(token: str) -> tuple[str, str]:
+    """
+    Возвращает (site, value) где site in {"pixiv","da","unknown"}.
+    token может быть url/id, а также с префиксами px: / da:
+    """
+    t = token.strip()
+    if not t:
+        return ("unknown", t)
+
+    # Явные префиксы
+    if t.lower().startswith("px:"):
+        return ("pixiv", t[3:].strip())
+    if t.lower().startswith("da:"):
+        return ("da", t[3:].strip())
+
+    # По домену
+    if PIXIV_URL_RE.search(t):
+        return ("pixiv", t)
+    if DA_URL_RE.search(t):
+        return ("da", t)
+
+    # Чисто числовой — по умолчанию Pixiv
+    if ONLY_DIGITS.match(t):
+        return ("pixiv", t)
+
+    return ("unknown", t)
+
+@dp.message(Command("img"))
+async def cmd_img(msg: Message, command: CommandObject):
+    if not is_admin(msg.from_user.id):
+        return
+
+    if not command or not command.args:
+        return await msg.answer(
+            "❌ Использование:\n"
+            "<code>/img &lt;ID|URL[,ID|URL,...]&gt; [теги...] [--all]</code>\n"
+            "Примеры:\n"
+            "<code>/img 126867032 ai --all</code>\n"
+            "<code>/img https://www.pixiv.net/en/artworks/132054690 ai --all</code>\n"
+            "<code>/img https://deviantart.com/.../1220472942,https://deviantart.com/.../1111205900 ai</code>\n"
+            "<code>/img px:132054690 da:1104774946 ai</code>"
+        )
+
+    try:
+        # 1) Первая "позиция" — список элементов (ID/URL) через запятую.
+        # Всё остальное — теги и, возможно, --all
+        parts = command.args.strip().split(maxsplit=1)
+        items_raw = parts[0]
+        tail = parts[1] if len(parts) > 1 else ""
+
+        # разобьём по запятой
+        tokens = [p.strip() for p in items_raw.split(",") if p.strip()]
+
+        # вытащим теги и флаг --all из хвоста
+        rest_tokens = [t for t in (tail.split() if tail else []) if t.strip()]
+        download_all = any(t == "--all" for t in rest_tokens)
+        extra_tags = [t for t in rest_tokens if t != "--all"]
+
+        # 2) Классифицируем по сайтам
+        pixiv_items, da_items, unknown_items = [], [], []
+        for tok in tokens:
+            site, val = _classify_item(tok)
+            if site == "pixiv":
+                pixiv_items.append(val)
+            elif site == "da":
+                da_items.append(val)
+            else:
+                unknown_items.append(val)
+
+        # Если вообще ничего валидного
+        if not pixiv_items and not da_items:
+            return await msg.answer(
+                "❌ Не распознал ни одного элемента как Pixiv или DeviantArt.\n"
+                "Поддерживаются: pixiv URLs/ID, deviantart URLs/ID.\n"
+                "Для явной указки можно использовать префиксы: <code>px:ID</code> или <code>da:ID</code>."
+            )
+
+        # Сформируем команды к внешним скриптам
+        # Используем тот же Python-интерпретатор, что и бот.
+        PY = sys.executable
+        BASEDIR = Path(__file__).resolve().parent
+        PIXIV_SCRIPT = str(BASEDIR / "pixiv_dl.py")
+        DA_SCRIPT    = str(BASEDIR / "deviantart_dl.py")
+
+        results = []
+
+        async def run_one(cmd: list[str], label: str):
+            proc = subprocess.run(cmd, capture_output=True, text=True)
+            out = proc.stdout.strip()
+            err = proc.stderr.strip()
+            status = "ok" if proc.returncode == 0 else f"exit {proc.returncode}"
+            results.append((label, status, out, err))
+
+        # Pixiv пакетно
+        if pixiv_items:
+            items_arg = ",".join(pixiv_items)
+            cmd = [PY, PIXIV_SCRIPT, items_arg]
+            # теги позиционно
+            cmd.extend(extra_tags)
+            if download_all:
+                cmd.append("--all")
+            await run_one(cmd, f"pixiv [{len(pixiv_items)}]")
+
+        # DeviantArt пакетно
+        if da_items:
+            items_arg = ",".join(da_items)
+            cmd = [PY, DA_SCRIPT, items_arg]
+            cmd.extend(extra_tags)
+            if download_all:
+                cmd.append("--all")
+            await run_one(cmd, f"deviantart [{len(da_items)}]")
+
+        # Сводный отчёт
+        lines = []
+        if unknown_items:
+            lines.append("⚠️ Неопознаны: " + ", ".join(map(html.escape, unknown_items)))
+
+        for label, status, out, err in results:
+            lines.append(f"— <b>{label}</b>: <code>{status}</code>")
+            if out:
+                # ограничим размер, чтобы не упереться в лимит Telegram
+                out_trim = out[-3500:] if len(out) > 3500 else out
+                lines.append(f"<pre>{html.escape(out_trim)}</pre>")
+            if err:
+                err_trim = err[-1500:] if len(err) > 1500 else err
+                lines.append(f"<pre>{html.escape(err_trim)}</pre>")
+
+        if not lines:
+            lines = ["✅ Готово (без вывода)."]
+
+        await msg.answer("\n".join(lines))
+
+    except Exception as e:
+        logger.exception("Ошибка в /img: %s", e)
+        await msg.answer(f"❌ Ошибка: {e}", parse_mode=None)
+
 @dp.message(Command("dl"))
 async def cmd_dl(msg: Message, command: CommandObject):
     if not is_admin(msg.from_user.id):
